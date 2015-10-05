@@ -1,26 +1,113 @@
 #! /bin/bash
 # Create version file
 function create_version {
-    echo "$1" > $2
-    git rev-list HEAD | wc -l >> $2
-    date +%Y-%m-%dT%H:%M:%S >> $2
-    git rev-parse --short HEAD >> $2
+    echo "$1/$2" > $3
+    git rev-list HEAD | wc -l >> $3
+    date +%Y-%m-%dT%H:%M:%S >> $3
+    git rev-parse --short HEAD >> $3
 }
 
+# git checkout
+# git sm init
+# git sm update
+# → submodules loaded
+# git sm deinit
+# good to go
 
-# Current version of compat
-cd /data/project/pywikibot/public_html/
+function create_core {
+    echo "Building $2/$1"
+    cd "$base_path/$2"
+    root=`pwd`
+    hsh=`git rev-parse --short $1`
+    name="${2}_${1}_$hsh"
+    if [[ -a "$base_path/$name" ]]; then
+        echo "Build $base_path/$name already exists."
+        return 1
+    fi
+    git checkout $1
+    git submodule init
+    git submodule update
+    mods=`git submodule status`
+    while read -r mod; do
+        mod=($mod)
+        mod=${mod[1]}
+        echo "Collect $mod"
+        cd "$root/$mod"
+        git gc --aggressive --prune=all --quiet
+    done <<< "$mods"
+    echo "done"
+    cd $root
+    # Check if the version is described by a tag
+    git describe --tags --exact-match $1 &> /dev/null
+    if [[ $? -eq 0 ]]; then
+        typ="stable"
+    else
+        typ="nightly"
+    fi
+    if [[ "$2" == "compat" ]]; then
+        ver_path="version"
+    else
+        ver_path="pywikibot/version"
+        cp -R "$base_path/mwparserfromhell/" mwparserfromhell/
+    fi
+    create_version "$typ" "$2" "$ver_path"
+    echo "Collect root"
+    git gc --aggressive --prune=all --quiet
+    echo "Compressing"
+    zip -9 -r -q "$base_path/${name}.zip" "$root"
+    tar czPf "$base_path/${name}.tar.gz" "$root/"
+    echo "Copying"
+    cp -R "$root" "$base_path/$name"
+    # Deinit all submodules so that they can be reinited on a new checkout
+    git submodule deinit .
+}
+
+# Configuration variables
+base_path="/data/project/pywikibot/public_html/"
+life_time=604800  # 7 days
+num_files=10
+
+# Debug values
+base_path=`pwd`
+base_path="$base_path/test"
+#life_time=0
+num_files=0
+# End debug values
+
+oldest_date=$((`date +"%s"` - $life_time))
+
+cd $base_path
 #Cloning mwparserfromhell bug: T88069
+rm -rf "mwparserfromhell"
 git clone https://github.com/earwig/mwparserfromhell.git
-rm -rf compat/
-git clone --recursive --depth 1 https://gerrit.wikimedia.org/r/pywikibot/compat.git
-#chmod -R 775 compat
-cd /data/project/pywikibot/public_html/compat
-create_version "nightly/compat" "version"
-git gc --aggressive --prune=all --quiet
-cd i18n
-git gc --aggressive --prune --quiet
+# Cloning core repository
+rm -rf "core"
+git clone https://gerrit.wikimedia.org/r/pywikibot/core.git core
+rm -rf "compat"
+git clone https://gerrit.wikimedia.org/r/pywikibot/compat.git compat
 
+create_core master core
+tags=`git tag`
+while read -r ver; do
+    create_core $ver core
+done <<< "$tags"
+create_core master compat
+
+
+files=`find "$base_path" -iname "core_master_*"`
+cd $base_path/core/
+num=0
+for f in $files
+do
+    v=(${f//[_.]/ })
+    dt=`git log --format="%ct" -n1 ${v[2]}`
+    if [[ $dt -lt $oldest_date ]] && [[ $num -ge $num_files ]]; then
+        echo "Delete outdated entry $f"
+        rm -rf $f
+    fi
+    num=$(($num + 1))
+done
+exit
 
 # Current version of core
 cd /data/project/pywikibot/public_html/
@@ -34,7 +121,7 @@ cd /data/project/pywikibot/public_html/core/scripts
 rm -rf i18n
 git clone --depth 1 https://gerrit.wikimedia.org/r/pywikibot/i18n.git
 cd /data/project/pywikibot/public_html/core
-create_version "nightly/core" "pywikibot/version"
+create_version "nightly" "core" "pywikibot/version"
 git gc --aggressive --prune=all --quiet
 cp -R /data/project/pywikibot/public_html/mwparserfromhell/mwparserfromhell/ mwparserfromhell/
 cd scripts/i18n
@@ -53,13 +140,23 @@ rm -rf i18n
 git clone https://gerrit.wikimedia.org/r/pywikibot/i18n.git
 cd /data/project/pywikibot/public_html/core_old
 git checkout $(git rev-list -n 1 --before=`date --date="7 days ago" +%F` master) -b core_old
-create_version "nightly/core" "pywikibot/version"
+create_version "nightly" "core" "pywikibot/version"
 git gc --aggressive --prune=all --quiet
 cp -R /data/project/pywikibot/public_html/mwparserfromhell/mwparserfromhell/ mwparserfromhell/
 
 
-#Create the latest stable version
-cd /data/project/pywikibot/public_html/
+#Create a version for each git tag
+cd $base_path
+git clone https://gerrit.wikimedia.org/r/pywikibot/core.git core_base
+cd 'core_base'
+tags=`git tag`
+while read -r ver; do
+    echo "... $ver ..."
+done <<< "$tags"
+git checkout $ver
+name='core_' + $ver + '_' + `git rev-parse --short HEAD`
+rm -rf externals
+
 rm -rf /data/project/pywikibot/public_html/core_stable
 git clone https://gerrit.wikimedia.org/r/pywikibot/core.git core_stable
 cd /data/project/pywikibot/public_html/core_stable/
@@ -71,7 +168,7 @@ cd /data/project/pywikibot/public_html/core_stable/scripts
 rm -rf i18n
 git clone https://gerrit.wikimedia.org/r/pywikibot/i18n.git
 cd /data/project/pywikibot/public_html/core_stable
-create_version "stable/core" "pywikibot/version"
+create_version "stable" "core" "pywikibot/version"
 git gc --aggressive --prune=all --quiet
 cp -R /data/project/pywikibot/public_html/mwparserfromhell/mwparserfromhell/ mwparserfromhell/
 
